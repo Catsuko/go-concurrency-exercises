@@ -30,36 +30,61 @@ type page struct {
 // KeyStoreCache is a LRU cache for string key-value pairs
 type KeyStoreCache struct {
 	cache map[string]*list.Element
-	pages list.List
+	pages chan *list.List
 	load  func(string) string
 }
 
 // New creates a new KeyStoreCache
 func New(load KeyStoreCacheLoader) *KeyStoreCache {
+	pagesChannel := make(chan *list.List, 1)
+	pagesChannel <- list.New()
 	return &KeyStoreCache{
 		load:  load.Load,
 		cache: make(map[string]*list.Element),
+		pages: pagesChannel,
 	}
 }
 
+func (k *KeyStoreCache) PageLength() int {
+	pages := <-k.pages
+	length := pages.Len()
+	k.pages <- pages
+	return length
+}
+
+// TODO: Currently access to the cache is competely serialized.
+// 			 Learn how this can be made concurrent whilst still supporting LRU
+//			 https://www.openmymind.net/High-Concurrency-LRU-Caching/
+
 // Get gets the key from cache, loads it from the source if needed
 func (k *KeyStoreCache) Get(key string) string {
+	pages := <-k.pages
+
 	if e, ok := k.cache[key]; ok {
-		k.pages.MoveToFront(e)
+		pages.MoveToFront(e)
+		k.pages <- pages
 		return e.Value.(page).Value
 	}
 	// Miss - load from database and save it in cache
+
+	// Return if another thread has loaded it in the meantime
+	if e, ok := k.cache[key]; ok {
+		k.pages <- pages
+		return e.Value.(page).Value
+	}
+
 	p := page{key, k.load(key)}
 	// if cache is full remove the least used item
 	if len(k.cache) >= CacheSize {
-		end := k.pages.Back()
+		end := pages.Back()
 		// remove from map
 		delete(k.cache, end.Value.(page).Key)
 		// remove from list
-		k.pages.Remove(end)
+		pages.Remove(end)
 	}
-	k.pages.PushFront(p)
-	k.cache[key] = k.pages.Front()
+	pages.PushFront(p)
+	k.cache[key] = pages.Front()
+	k.pages <- pages
 	return p.Value
 }
 
